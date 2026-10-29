@@ -1,0 +1,16 @@
+{"type":"computer-isolation","provider":"none","isolation":"off"}
+2803 |   identityStore,
+2804 |   identityGithubCallback,
+2805 |   profileStore,
+2806 | );
+2807 | 
+2808 | startHttpServer({
+       ^
+error: Failed to start server. Is port 3001 in use?
+ syscall: "listen",
+   errno: 0,
+    code: "EADDRINUSE"
+
+      at /opt/data/cache/scratch/openbot/server/src/index.ts:2808:1
+
+Bun v1.4.4 (Linux x64)

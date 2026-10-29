@@ -1,0 +1,5 @@
+{"type":"computer-isolation","provider":"none","isolation":"off"}
+No identity provider is configured, so every request is treated as dev@openbot.local (administrator). Configure GOOGLE_OAUTH_*, MICROSOFT_OAUTH_* or OKTA_OAUTH_* before anybody else can reach this.
+OpenBot server listening on http://127.0.0.1:3001
+{"type":"memory-defaults","outcome":"research_adopted","agentId":"general-assistant","timestamp":"2026-10-29T20:15:35.408Z"}
+{"type":"channel-summaries","written":["channel_89099fe0-9ced-43e6-b1dd-bb5256d94807"]}
