@@ -97,6 +97,12 @@ export function createPersistentRunner(options: {
   `);
 
   const live = options.live ?? new InMemoryAgentRunner();
+  /* The same object, typed for the reads it may or may not implement. */
+  const liveRead = live as unknown as {
+    listThreads?: (scope?: LocalThreadEndpointScope) => LocalThreadEndpointRecord[];
+    getThreadMessages?: (threadId: string, scope?: LocalThreadEndpointScope) => Message[];
+    getThreadEvents?: (threadId: string, scope?: LocalThreadEndpointScope) => BaseEvent[];
+  };
 
   const ownerOf = (ownerId: string | undefined) => ɵresolveOwner(ownerId);
 
@@ -316,16 +322,24 @@ export function createPersistentRunner(options: {
           "SELECT * FROM threads WHERE owner_id = ? AND archived = 0 ORDER BY updated_at DESC",
         )
         .all(owner);
-      return rows.map((row) => ({
+      /* A thread whose first run is still going has not been written yet; it comes from the live
+         runner so the list does not lose a conversation in the seconds after somebody opens it. */
+      const liveThreads = liveRead.listThreads?.(scope) ?? [];
+      const known = new Set(rows.map((row) => row.id));
+      const merged = [
+        ...liveThreads.filter((thread) => !known.has(thread.id)),
+        ...rows.map((row) => ({
         id: row.id,
         name: row.name,
         agentId: row.agent_id,
         organizationId: "",
         createdById: row.owner_id,
         archived: row.archived === 1,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      }));
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        })),
+      ];
+      return merged;
     },
 
     getThreadMessages(
@@ -334,6 +348,14 @@ export function createPersistentRunner(options: {
     ): Message[] {
       if (!runner.isThreadAccessible(threadId, { ownerId: ownerOf(scope?.ownerId) }))
         return [];
+      /*
+       * LIVE FIRST, THEN THE FILE. A run in flight holds its messages in the runner, and anything
+       * reading history mid-run — the approval resume is the one that matters — needs to see the
+       * tool call it is being asked about. Reading only the file was a real refusal: the call had
+       * not been written yet, so the resume answered "that unanswered tool call is not saved".
+       */
+      const liveMessages = liveRead.getThreadMessages?.(threadId, scope) ?? [];
+      if (liveMessages.length > 0) return liveMessages;
       const rows = db
         .query<{ json: string }, [string]>(
           "SELECT json FROM messages WHERE thread_id = ? ORDER BY seq ASC",
@@ -345,6 +367,8 @@ export function createPersistentRunner(options: {
     getThreadEvents(threadId: string, scope?: LocalThreadEndpointScope): BaseEvent[] {
       if (!runner.isThreadAccessible(threadId, { ownerId: ownerOf(scope?.ownerId) }))
         return [];
+      const liveEvents = liveRead.getThreadEvents?.(threadId, scope) ?? [];
+      if (liveEvents.length > 0) return liveEvents;
       const rows = db
         .query<{ json: string }, [string]>(
           "SELECT json FROM events WHERE thread_id = ? ORDER BY run_id ASC, seq ASC",
@@ -369,6 +393,10 @@ export function createPersistentRunner(options: {
 
     clearThreads(scope?: LocalThreadEndpointScope): void {
       const owner = ownerOf(scope?.ownerId);
+      /* The live runner holds the conversations this process ran; clearing only the file would
+         leave them listed and readable until the next restart. */
+      (live as unknown as { clearThreads?: (scope?: LocalThreadEndpointScope) => void })
+        .clearThreads?.(scope);
       const threads = runner.listThreads({ ownerId: owner }).map((row) => row.id);
       for (const threadId of threads) {
         db.run("DELETE FROM messages WHERE thread_id = ?", [threadId]);
