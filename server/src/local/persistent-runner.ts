@@ -98,6 +98,16 @@ export function createPersistentRunner(options: {
 
   const live = options.live ?? new InMemoryAgentRunner();
   /* The same object, typed for the reads it may or may not implement. */
+  /*
+   * CE QU'UN RUN EN COURS A DÉJÀ DIT.
+   *
+   * L'approbation d'une action relit la conversation PENDANT le tour pour retrouver l'appel d'outil
+   * qu'elle reprend. Le runner en mémoire ne publie ses messages qu'à la fin, et le fichier encore
+   * moins : sans cet état, la reprise ne trouvait rien et refusait l'action (« that unanswered tool
+   * call is not saved »). On assemble donc les messages au fil des événements, et on les rend tant
+   * que le run tourne.
+   */
+  const inflight = new Map<string, Message[]>();
   const liveRead = live as unknown as {
     listThreads?: (scope?: LocalThreadEndpointScope) => LocalThreadEndpointRecord[];
     getThreadMessages?: (threadId: string, scope?: LocalThreadEndpointScope) => Message[];
@@ -164,6 +174,12 @@ export function createPersistentRunner(options: {
     ownerId: string;
     events: BaseEvent[];
     state: unknown;
+    /**
+     * Les messages assemblés au fil du run : l'historique du tour, le texte du bot, ses appels
+     * d'outils et leurs résultats. Écrits tels quels, ils se relisent à l'identique après un
+     * redémarrage — y compris l'appel qu'une approbation doit retrouver.
+     */
+    messages?: Message[];
   }) => {
     const started = input.events.find(
       (event) => (event as { type?: string }).type === "RUN_STARTED",
@@ -199,38 +215,16 @@ export function createPersistentRunner(options: {
         .get(input.threadId);
       return (row?.n ?? -1) + 1;
     };
-    for (const message of history) {
+    /* Les messages assemblés d'abord ; l'historique du tour n'est qu'un repli pour un run qui
+       n'aurait rien émis. */
+    const toStore = input.messages?.length ? input.messages : history;
+    for (const message of toStore) {
       if (!message?.id) continue;
       insertMessage.run([
         input.threadId,
         message.id,
         nextSeq(),
         JSON.stringify(message),
-      ] as never);
-    }
-    /* The assistant's own words, rebuilt from the stream. Nothing here invents content: a message
-       exists because TEXT_MESSAGE_START opened it and its deltas were appended to it. */
-    const assistant: { id: string; text: string }[] = [];
-    for (const event of input.events) {
-      const typed = event as {
-        type?: string;
-        messageId?: string;
-        delta?: string;
-      };
-      if (typed.type === "TEXT_MESSAGE_START" && typed.messageId) {
-        assistant.push({ id: typed.messageId, text: "" });
-      }
-      if (typed.type === "TEXT_MESSAGE_CONTENT" && typed.messageId) {
-        const current = assistant.find((entry) => entry.id === typed.messageId);
-        if (current) current.text += typed.delta ?? "";
-      }
-    }
-    for (const message of assistant) {
-      insertMessage.run([
-        input.threadId,
-        message.id,
-        nextSeq(),
-        JSON.stringify({ id: message.id, role: "assistant", content: message.text }),
       ] as never);
     }
 
@@ -274,14 +268,99 @@ export function createPersistentRunner(options: {
             ownerId: ownerOf(request.ownerId),
             events,
             state: request.input.state,
+            messages: collected,
           });
         };
+        const seen = new Map<string, { id: string; role: string; content: string }>();
+        const calls = new Map<string, { id: string; name: string; args: string; parent?: string }>();
+        const collected: Message[] = [...(request.input.messages ?? [])];
+        inflight.set(request.threadId, collected);
         const subscription = live.run(request).subscribe({
           next: (event) => {
             events.push(event);
             subscriber.next(event);
-            const type = (event as { type?: string }).type;
-            if (type === "RUN_FINISHED" || type === "RUN_ERROR") flush();
+            const typed = event as {
+              type?: string;
+              messageId?: string;
+              role?: string;
+              delta?: string;
+              toolCallId?: string;
+              toolCallName?: string;
+              parentMessageId?: string;
+              content?: unknown;
+            };
+            switch (typed.type) {
+              case "TEXT_MESSAGE_START":
+                if (typed.messageId)
+                  seen.set(typed.messageId, {
+                    id: typed.messageId,
+                    role: typed.role ?? "assistant",
+                    content: "",
+                  });
+                break;
+              case "TEXT_MESSAGE_CONTENT": {
+                const current = typed.messageId ? seen.get(typed.messageId) : undefined;
+                if (current) current.content += typed.delta ?? "";
+                break;
+              }
+              case "TEXT_MESSAGE_END": {
+                const done = typed.messageId ? seen.get(typed.messageId) : undefined;
+                if (done) {
+                  collected.push(done as unknown as Message);
+                  seen.delete(done.id);
+                }
+                break;
+              }
+              case "TOOL_CALL_START":
+                if (typed.toolCallId)
+                  calls.set(typed.toolCallId, {
+                    id: typed.toolCallId,
+                    name: typed.toolCallName ?? "tool",
+                    args: "",
+                    parent: typed.parentMessageId,
+                  });
+                break;
+              case "TOOL_CALL_ARGS": {
+                const call = typed.toolCallId ? calls.get(typed.toolCallId) : undefined;
+                if (call) call.args += typed.delta ?? "";
+                break;
+              }
+              case "TOOL_CALL_END": {
+                const call = typed.toolCallId ? calls.get(typed.toolCallId) : undefined;
+                if (call) {
+                  /* La forme que l'approbation lit : un appel aplati (id, nom, arguments), pas la
+                     forme imbriquée du protocole. */
+                  collected.push({
+                    id: call.parent ?? call.id,
+                    role: "assistant",
+                    content: "",
+                    toolCalls: [
+                      { id: call.id, name: call.name, args: call.args },
+                    ],
+                  } as unknown as Message);
+                }
+                break;
+              }
+              case "TOOL_CALL_RESULT":
+                if (typed.toolCallId)
+                  collected.push({
+                    id: `tool-${typed.toolCallId}`,
+                    role: "tool",
+                    toolCallId: typed.toolCallId,
+                    content:
+                      typeof typed.content === "string"
+                        ? typed.content
+                        : JSON.stringify(typed.content ?? ""),
+                  } as unknown as Message);
+                break;
+              default:
+                break;
+            }
+            const type = typed.type;
+            if (type === "RUN_FINISHED" || type === "RUN_ERROR") {
+              flush();
+              inflight.delete(request.threadId);
+            }
           },
           error: (error) => {
             flush();
@@ -354,6 +433,8 @@ export function createPersistentRunner(options: {
        * tool call it is being asked about. Reading only the file was a real refusal: the call had
        * not been written yet, so the resume answered "that unanswered tool call is not saved".
        */
+      const running = inflight.get(threadId) ?? [];
+      if (running.length > 0) return running;
       const liveMessages = liveRead.getThreadMessages?.(threadId, scope) ?? [];
       if (liveMessages.length > 0) return liveMessages;
       const rows = db
