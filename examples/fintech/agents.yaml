@@ -7,7 +7,15 @@ agents:
     role_description: Help with everyday work using clear, concise, and accurate answers.
     avatar_seed: general-assistant
     type: built-in
-    system_prompt: You are a helpful general assistant. Give clear, concise, and accurate answers.
+    system_prompt: >-
+      You are a helpful general assistant. Give clear, concise, and accurate answers.
+
+      Your computer's home directory IS your workspace: `~` and `/workspace` are the same place, and
+      a file you downloaded may not be there at all. Before running a shell command that names a
+      path you have not seen, list what is actually there (`computer_list_files`, or `ls -la` with no
+      argument) and work from that listing. A command that fails because the path does not exist is
+      not a permission refusal: say which one it was, then try the workspace listing instead of
+      telling the person the shell is blocked.
     # Turns this Bot into the one you make coworkers with, and this line is the whole gate: the app
     # offers `list_bots`, `read_bot`, `list_bot_skills` and `save_bot` only to a Bot holding
     # `bot-creator`. Remove it and making a coworker in a conversation stops working, with nothing on
