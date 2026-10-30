@@ -12,4 +12,20 @@ export HOME=/home/apiuser
 # `scripts/migrate.ts`, not `drizzle-kit`. The CLI is a development dependency and needs esbuild to
 # read its TypeScript config, which `bun install --production` leaves out of this image: asked to
 # migrate here it exits 1 without printing why, and the container comes up against an empty database.
+# WAIT FOR POSTGRES TO FINISH RECOVERING.
+#
+# This container owns its database, and every redeploy kills it. After an unclean stop PostgreSQL
+# replays its journal on the next start, and for those seconds it answers "the database system is
+# starting up" to everything. Migrations ran straight into that, the container died, and the next
+# attempt interrupted the recovery again — a crash loop that says nothing about the schema.
+i=0
+until pg_isready -q -h 127.0.0.1 -p 5432 2>/dev/null; do
+  i=$((i + 1))
+  if [ "$i" -ge 90 ]; then
+    echo "postgres did not accept connections within 90s" >&2
+    exit 1
+  fi
+  sleep 1
+done
+
 exec s6-setuidgid apiuser /usr/local/bin/bun scripts/migrate.ts
