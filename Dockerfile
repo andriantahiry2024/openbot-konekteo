@@ -246,8 +246,9 @@ ENV AGENT_COMPUTER_URL=http://127.0.0.1:4100
 # The two directories the browser writes are its workspace and its profile, the second being what
 # keeps a Bot signed in between turns. Owned here, because a non-root process cannot create them at
 # the root of the filesystem and the failure surfaces as EACCES on the first navigation.
-RUN mkdir -p /workspace /profiles \
-  && chown -R pwuser:pwuser /workspace /profiles /app
+RUN mkdir -p /workspace /profiles /data \
+  && chown -R pwuser:pwuser /workspace /profiles /app \
+  && chown -R apiuser:apiuser /data
 
 # Where the embedded database answers, when there is one. Overridden by whatever you set, so an
 # external database needs no special case: set DATABASE_URL and EMBEDDED_POSTGRES stays off.
